@@ -33,6 +33,14 @@ The SDK automatically reads the following environment variables:
 | `ENVGOD_ENV` | Environment Name (e.g., prod) |
 | `ENVGOD_SERVICE` | Service Name |
 
+```env
+ENVGOD_API_URL=https://api.example.com
+ENVGOD_API_KEY=sk_xxx
+ENVGOD_PROJECT=myapp
+ENVGOD_ENV=prod
+ENVGOD_SERVICE=web
+```
+
 ## Usage
 
 ### Node.js
@@ -76,7 +84,7 @@ export default async function Page() {
 ## Security Notes
 
 1. **Server-Only**: This SDK is designed strictly for server environments. It explicitly checks for `window` and imports `server-only` in the Next.js entrypoint.
-2. **No Persistance**: Secrets are held in memory. Restarting the server will trigger a fresh fetch.
+2. **No Persistence**: Secrets are held in memory. Restarting the server will trigger a fresh fetch.
 3. **Logs**: The SDK does not log secret values.
 
 ## For Maintainers
