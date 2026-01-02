@@ -7,19 +7,12 @@ interface CacheState {
     bundle: Record<string, string> | null;
 }
 
-const state: CacheState = {
-    token: null,
-    tokenExpiresAt: null,
-    bundle: null,
-};
-
+const cache = new Map<string, CacheState>();
 let pendingLoadPromise: Promise<Record<string, string>> | null = null;
 
 /** @internal For testing only */
 export function _resetState() {
-    state.token = null;
-    state.tokenExpiresAt = null;
-    state.bundle = null;
+    cache.clear();
     pendingLoadPromise = null;
 }
 
@@ -39,12 +32,8 @@ export function getEnvGodConfig(options?: LoadEnvOptions): EnvGodConfig {
         service: options?.config?.service ?? env.ENVGOD_SERVICE,
     };
 
-    const missing = Object.entries(config)
-        .filter(([_, v]) => !v)
-        .map(([k]) => k);
-
-    if (missing.length > 0) {
-        throw new Error(`[EnvGod] Missing required configuration: ${missing.join(', ')}`);
+    if (!config.apiUrl || !config.apiKey) {
+        throw new Error('[EnvGod] Missing required configuration: apiUrl and apiKey are required.');
     }
 
     return config as EnvGodConfig;
@@ -82,7 +71,7 @@ async function fetchWithTimeout(url: string, init: RequestInit & { timeout?: num
 
 // --- Core Logic ---
 
-async function exchangeToken(config: EnvGodConfig, timeout: number): Promise<string> {
+async function exchangeToken(config: EnvGodConfig, timeout: number, state: CacheState): Promise<string> {
     const res = await fetchWithTimeout(`${config.apiUrl}/v1/auth/exchange`, {
         method: 'POST',
         headers: {
@@ -128,28 +117,36 @@ async function fetchBundle(config: EnvGodConfig, token: string, timeout: number)
     return data.values;
 }
 
+function getConfigFingerprint(config: EnvGodConfig): string {
+    const keyPrefix = config.apiKey.substring(0, 8);
+    return [config.apiUrl, keyPrefix, config.project, config.env, config.service].join('|');
+}
+
 async function loadEnvInternal(options?: LoadEnvOptions): Promise<Record<string, string>> {
     checkBrowser();
     const config = getEnvGodConfig(options);
     const timeout = options?.timeout ?? 5000;
     const now = Date.now();
+    const TOKEN_SKEW_MS = 30 * 1000; // 30 seconds
 
-    // 1. Check if we have a valid token
+    const fingerprint = getConfigFingerprint(config);
+    if (!cache.has(fingerprint)) {
+        cache.set(fingerprint, { token: null, tokenExpiresAt: null, bundle: null });
+    }
+    const state = cache.get(fingerprint)!;
+
     let token = state.token;
-    let tokenValid = token && state.tokenExpiresAt && state.tokenExpiresAt > now;
+    let tokenValid = token && state.tokenExpiresAt && state.tokenExpiresAt > (now + TOKEN_SKEW_MS);
 
-    // 2. If token invalid, exchange
     if (!tokenValid) {
-        token = await exchangeToken(config, timeout);
+        token = await exchangeToken(config, timeout, state);
     }
 
-    // 3. If we have a cached bundle and the token is still the same/valid, return it?
     if (state.bundle && tokenValid) {
         Object.assign(process.env, state.bundle);
         return state.bundle;
     }
 
-    // 4. Fetch bundle with retry logic
     try {
         const values = await fetchBundle(config, token!, timeout);
         state.bundle = values;
@@ -157,11 +154,9 @@ async function loadEnvInternal(options?: LoadEnvOptions): Promise<Record<string,
         return values;
     } catch (err: any) {
         if (err.message === '401') {
-            // Retry ONCE: Re-exchange and Re-fetch
             state.token = null;
             state.bundle = null;
-
-            const newToken = await exchangeToken(config, timeout);
+            const newToken = await exchangeToken(config, timeout, state);
             const values = await fetchBundle(config, newToken, timeout);
             state.bundle = values;
             Object.assign(process.env, values);

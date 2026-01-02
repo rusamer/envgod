@@ -1,0 +1,412 @@
+PROMPT 1/4 — EnvGod Backend: Teams (Orgs/RBAC) + Access Requests + Device Code Flow (CLI Login)
+
+Context
+We have an existing EnvGod backend (Fastify + Prisma + PostgreSQL) with:
+- Control Plane: users auth (register/login/logout), projects/env/services, secrets (replace-only), api keys (show-once), audit logs
+- Data Plane: exchange + bundle delivery working with @rusamer/envgod SDK
+We now need to add TEAM support and CLI onboarding with maximum security and easy team UX.
+
+Goal
+Implement:
+1) Organizations + membership + RBAC (OWNER, MAINTAINER, DEVELOPER)
+2) Access Requests workflow (developer requests runtime-key, maintainer approves)
+3) Device Code flow for CLI login (envgod login) + devices management
+4) Audit events for all new actions
+5) Keep Data Plane stable and backward compatible with the published SDK
+
+Non-Negotiable Security Constraints
+- Do NOT log secret values, raw API keys, JWTs, or device codes.
+- Secrets remain replace-only; never expose values via Control Plane.
+- Runtime keys are scoped to (projectId, envId, serviceId) by default (no wildcards in MVP).
+- Revocation must be immediate (DP bundle checks key status on every request).
+- Device_code must be stored hashed server-side; never store it in plaintext.
+- All CP handlers must enforce org membership + role requirements.
+
+Scope — What to build
+
+A) Prisma schema changes (new models + relations)
+Add:
+- Organization (id, name, createdAt)
+- OrgMember (id, orgId, userId, role enum OWNER|MAINTAINER|DEVELOPER, createdAt)
+Modify:
+- Project -> add orgId (required), keep createdByUserId for audit trace
+Add:
+- AccessRequest (id, orgId, projectId, envId, serviceId, requesterUserId, status enum PENDING|APPROVED|DENIED, reason?, createdAt, decidedAt?, decidedByUserId?)
+Add:
+- DeviceSession (id, userId, orgId, deviceName, status enum PENDING|ACTIVE|REVOKED|EXPIRED, createdAt, lastUsedAt?)
+Add:
+- DeviceCode (id, deviceCodeHash, userCode, deviceSessionId, expiresAt, intervalSec)
+Optional but recommended:
+- RefreshToken (id, userId, tokenHash, deviceSessionId?, expiresAt, revokedAt?)
+Audit updates:
+- Extend AuditEventType enum with:
+  ORG_CREATE, ORG_MEMBER_ROLE_CHANGE,
+  ACCESS_REQUEST_CREATE, ACCESS_REQUEST_APPROVE, ACCESS_REQUEST_DENY,
+  DEVICE_START, DEVICE_APPROVE, DEVICE_REVOKE
+Migration must be created and prisma generate run.
+
+B) RBAC enforcement layer
+Create helpers:
+- requireOrgMember(userId, orgId) -> returns role
+- requireRole(role >= requiredRole)
+- assertProjectInOrg(projectId, orgId)
+Enforce on every CP route.
+
+C) New CP routes
+1) Organizations
+- POST /cp/orgs (create org; caller becomes OWNER)
+- GET /cp/orgs (list orgs for user)
+- GET /cp/orgs/:orgId/members (OWNER only)
+- PATCH /cp/orgs/:orgId/members/:memberId/role (OWNER only)
+
+2) Projects under org (prefer new routes; keep old compatible if needed)
+- GET  /cp/orgs/:orgId/projects
+- POST /cp/orgs/:orgId/projects
+
+3) Access Requests
+- POST /cp/access-requests
+  body: { orgId, projectId, envId, serviceId, reason? }
+  role: any member (DEVELOPER allowed)
+  creates PENDING request; audit ACCESS_REQUEST_CREATE
+- GET /cp/access-requests?orgId=...&status=PENDING|APPROVED|DENIED
+  role: maintainer/owner sees org; developer sees only own requests
+- POST /cp/access-requests/:id/approve
+  role: MAINTAINER/OWNER
+  action:
+   - mark APPROVED + decidedBy/decidedAt
+   - create a scoped runtime API key for (projectId, envId, serviceId)
+   - return raw key ONCE in response payload + prefix
+   - audit ACCESS_REQUEST_APPROVE and APIKEY_CREATE
+- POST /cp/access-requests/:id/deny
+  role: MAINTAINER/OWNER
+  mark DENIED; audit ACCESS_REQUEST_DENY
+
+4) Device Code flow (CLI login)
+- POST /cp/device/start
+  returns: { device_code, user_code, verification_url, expires_in, interval }
+  server:
+   - create DeviceSession status PENDING for user (userId inferred after login? see below)
+  IMPORTANT: Device start should not require existing CP login for CLI.
+  Implement as “pre-auth start” where DeviceSession is created without userId yet OR associated after approval.
+  Choose one:
+   Option 1 (recommended): DeviceSession initially has no userId, later bound on approval.
+   Option 2: require CLI to already have CP credentials (not desired).
+  Store device_code hashed, user_code plain, expiration 10 minutes, interval 5 seconds.
+
+- POST /cp/device/approve
+  requires dashboard auth (cp_access_token)
+  body: { user_code, orgId, projectId, envId, serviceId, deviceName, permissions }
+  permissions MVP: ["REQUEST_RUNTIME_KEY"] and optional ["MANAGE_KEYS"] for maintainer role
+  server:
+   - locate DeviceCode by user_code, check not expired
+   - bind DeviceSession to approving user (the logged-in dashboard user) and orgId
+   - set DeviceSession ACTIVE, store deviceName
+   - audit DEVICE_APPROVE
+
+- POST /cp/device/token
+  body: { device_code }
+  server:
+   - hash device_code and locate DeviceCode
+   - if not approved -> return { status: "authorization_pending" }
+   - if denied -> { status: "access_denied" }
+   - if expired -> { status: "expired_token" }
+   - if approved -> return:
+     { access_token: <cp_access_token>, refresh_token: <optional>, expires_in, orgId, user }
+  Ensure cp_access_token is a normal CP JWT with typ="cp-access", aud="envgod-control-plane", sub=userId.
+
+- GET /cp/devices?orgId=...
+  role: any member can list own devices; owner can list org devices (optional)
+- POST /cp/devices/:id/revoke
+  owner or device owner can revoke; audit DEVICE_REVOKE
+
+D) Keep Data Plane stable
+Do not change DP routes or auth scheme that SDK depends on.
+Continue to accept current SDK behavior.
+
+E) Seed updates
+Update seed to:
+- create demo org + owner + maintainer + developer users (hashed passwords)
+- create demo project/env/service under org
+- create demo secrets + runtime key
+- print demo credentials (email/password) and runtime key once
+
+Verification Checklist (must provide outputs)
+- prisma migrate + generate succeed
+- role checks:
+  - developer cannot upsert secrets
+  - maintainer can approve requests and create keys
+- access request flow works end-to-end
+- device start/approve/token works end-to-end
+- DP still works with existing SDK integration test
+- audit events written for new operations
+Deliverables
+- Code changes with file paths
+- New migration files
+- Updated OpenAPI tags and security schemes for new endpoints
+- Short README update describing teams + CLI login flow
+Signature
+Samer Samir (rusamer)
+rusamer@gmail.com
+
+
+PROMPT 2/4 — EnvGod Dashboard (Next.js 14): Teams UI + Requests Inbox + Device Approval + Devices (BFF-only)
+
+Context
+We have an existing Next.js 14 dashboard with NextAuth and BFF route handlers that call backend /cp/*.
+We are adding teams (orgs/roles), access requests, and device approval flow for CLI login.
+Browser must NEVER call backend /cp/* directly and must NEVER call /v1/*.
+
+Goal
+Implement professional UI/UX for:
+- Org selector + members management (Owner)
+- Access Requests inbox (Maintainer/Owner approve/deny)
+- Device approval screen for CLI (enter user_code, pick org/project/env/service, approve)
+- Devices list + revoke
+Keep secrets replace-only and API keys show-once intact.
+
+Non-negotiable security constraints
+- cp_access_token must never be exposed to browser session or client JS.
+- All backend calls must go through /app/api/cp/** route handlers (BFF).
+- Do not display secret values or raw runtime keys after initial show-once modal.
+- Normalize errors from BFF (401/403/404/429) into safe messages.
+
+Versions
+- Next.js 14, React 18 pinned stable
+- NextAuth credentials provider
+- pnpm with lockfile
+
+Required pages/routes
+
+A) Public
+- / (landing)
+- /login
+- /register
+
+B) Protected
+- /orgs (list orgs + create org)
+- /orgs/[orgId]/members (Owner: list members + change role)
+- /requests (inbox; filter by org + status)
+- /requests/[id] (optional detail)
+- /device (device approval: enter user_code)
+- /settings/devices (list devices + revoke)
+Keep existing:
+- /projects, /projects/[projectId], /projects/[projectId]/secrets, /api-keys, /audit
+
+BFF route handlers (required)
+Add under /app/api/cp/*
+- orgs: GET/POST
+- org members: GET/PATCH role
+- access-requests: GET/POST
+- access-requests/:id/approve POST
+- access-requests/:id/deny POST
+- device/approve POST (dashboard action)
+- devices GET
+- devices/:id/revoke POST
+All handlers must:
+- use server-side token extraction via next-auth/jwt getToken()
+- attach Authorization: Bearer <cp_access_token>
+- map errors to safe codes:
+  401 UNAUTHENTICATED, 403 ACCESS_DENIED, 404 FEATURE_NOT_AVAILABLE, 429 RATE_LIMITED, default ERROR
+- never return raw backend error body
+
+Device approval UX requirements
+- Step 1: Input user_code
+- Step 2: After user_code validated, show selectors:
+  - org
+  - project (filtered by org)
+  - env
+  - service
+  - deviceName (default from UA)
+  - permissions (MVP default: REQUEST_RUNTIME_KEY; maintainer can add MANAGE_KEYS)
+- Approve button calls BFF /api/cp/device/approve
+- Show success state: “CLI is now connected. Return to terminal.”
+
+Requests inbox UX
+- Table of requests with:
+  - requester
+  - project/env/service
+  - reason
+  - createdAt
+  - status
+  - actions: Approve/Deny (only maintainer/owner)
+- Approve opens modal:
+  - confirms scope
+  - shows raw runtime key ONCE (copy + confirm checkbox)
+  - warns “Save it now; it won’t be shown again”
+- Deny requires a reason (optional) and confirmation
+
+Members page UX (Owner)
+- List members + role dropdown
+- Confirm role changes
+- Audit-safe messages only
+
+Devices page UX
+- List devices:
+  - deviceName
+  - createdAt
+  - lastUsedAt
+  - status
+- Revoke with confirmation
+
+Deliverables
+- Updated file tree
+- All new pages + components
+- All BFF handlers
+- Updated middleware protection
+- README update for teams flow and CLI approval
+- Manual test checklist:
+  - dev creates request
+  - maintainer approves and sees key once
+  - device code approval works
+Signature
+Samer Samir (rusamer)
+rusamer@gmail.com
+
+
+PROMPT 3/4 — EnvGod SDK (@rusamer/envgod): Runtime Key Model Alignment + Optional Scope Hints + Safe Caching (Patch Release)
+
+Context
+SDK already exists and is published. Backend now adds teams, but SDK remains runtime-only and Data Plane only.
+SDK must keep working with Data Plane contract, and improve safety/usability.
+
+Goal
+Release SDK patch (e.g., 0.0.2) with:
+- Optional scope hints (project/env/service optional)
+- Cache keyed by config fingerprint (avoid cross-scope collisions)
+- Token skew refresh
+- Keep: server-only enforcement, one retry on 401, memory-only caching
+
+Non-negotiable constraints
+- Throw in browser environments
+- envgod/next must import "server-only"
+- Never write secrets to disk
+- Never log secret values, keys, or tokens
+- Keep retry policy: 1 retry on 401 by re-exchange
+
+Changes required
+1) Config validation
+- ENVGODS_API_URL required
+- ENVGODS_API_KEY required
+- ENVGODS_PROJECT/ENVGODS_ENV/ENVGODS_SERVICE optional (scope hints only)
+- Support existing ENVGOD_* names if already used, but document one canonical set.
+
+2) Caching
+- Key cache by: apiUrl + apiKeyPrefix + project/env/service (optional)
+- Singleflight per cache key
+
+3) Token skew
+- Treat token invalid if less than 30s remains
+
+4) Docs cleanup
+- Fix README formatting
+- Document env vars and Vercel usage
+- Document that scope hints are optional and keys are scoped by default
+
+5) Tests
+- Add tests for omitted scope hints
+- Add tests for per-key caching
+- Ensure all existing tests pass
+
+Deliverables
+- Updated files with paths
+- Tests passing output
+- Release notes for 0.0.2
+Signature
+Samer Samir (rusamer)
+rusamer@gmail.com
+
+
+PROMPT 4/4 — EnvGod CLI (envgod): Device Login + Requests + Safe Local Storage + npm Publish Plan
+
+Context
+We need a new CLI tool that works for teams. It must be safe by default:
+- Works even if the user has no permissions (Developer role)
+- Primary purpose: login, identity, list org/projects, create access requests
+- Does NOT pull secrets or write .env by default (optional later)
+
+Goal
+Build a publish-ready CLI:
+- Package: @rusamer/envgod-cli
+- Binary: envgod
+- Node >= 20.17.0
+- Uses CP device code flow:
+  - POST /cp/device/start
+  - Browser approval page (dashboard)
+  - POST /cp/device/token polling
+- Stores refresh token securely (keychain preferred)
+
+Non-negotiable security constraints
+- Never print raw tokens to stdout
+- Never log headers/bodies that may contain secrets
+- Store refresh token securely:
+  - Prefer OS keychain via keytar
+  - Fallback: encrypted local file with user-chosen passphrase (PBKDF2 + AES-256-GCM)
+- Support logout that revokes local token and optionally calls backend device revoke
+- Rate-limit polling and respect interval from server response
+
+CLI commands (MVP)
+- envgod login
+  - starts device flow
+  - prints verification URL and user_code
+  - polls token endpoint until approved/denied/expired
+  - stores refresh token + orgId + user profile
+- envgod logout
+  - clears local tokens
+- envgod whoami
+  - prints safe identity (email, org, role) without tokens
+- envgod orgs
+  - lists orgs (via CP endpoint) using access token
+- envgod projects --org <orgId>
+  - lists projects in org
+- envgod request runtime-key --org <orgId> --project <id|name> --env <id|name> --service <id|name> --reason "..."
+  - creates AccessRequest
+- envgod status
+  - checks token validity and backend reachability (healthz)
+
+Implementation plan (Node/TS)
+- Use commander or yargs (keep deps minimal)
+- HTTP client: native fetch
+- Layout:
+  packages/envgod-cli/
+    src/index.ts
+    src/commands/*.ts
+    src/lib/api.ts (handles base URL, auth, refresh)
+    src/lib/device-flow.ts
+    src/lib/store.ts (keychain/encrypted file)
+    src/lib/config.ts (env + config file)
+- Provide build using tsup to output dist
+
+Auth/token strategy
+- Store refresh token, rotate if backend supports it
+- Use access token short-lived; refresh when needed
+- If backend does not implement refresh yet:
+  - store long-lived device token but keep it revocable via devices page (not ideal but acceptable for MVP)
+- All requests include Authorization: Bearer <cp_access_token>
+
+Installation map
+- npm i -g @rusamer/envgod-cli
+- pnpm add -g @rusamer/envgod-cli
+- npx @rusamer/envgod-cli login
+Publish steps (must include)
+- package.json:
+  - name, version, bin, engines, packageManager, files
+  - scripts: build, test, prepublishOnly
+- README:
+  - install methods
+  - login flow
+  - request runtime key flow
+  - troubleshooting
+
+Verification checklist
+- login works end-to-end with dashboard approval
+- developer without permissions can create access request
+- maintainer approves in dashboard and request becomes APPROVED
+- whoami/orgs/projects/status commands work
+- tokens are not printed and are stored securely
+Deliverables
+- Full code with file paths
+- README
+- publish-ready package.json
+Signature
+Samer Samir (rusamer)
+rusamer@gmail.com

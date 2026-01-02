@@ -3,3 +3,5 @@ dist
 .env
 cache
 coverage
+.txt
+txt

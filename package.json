@@ -1,6 +1,6 @@
 {
   "name": "@rusamer/envgod",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Secure Node.js/Next.js SDK for EnvGod",
   "repository": {
     "type": "git",
