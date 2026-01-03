@@ -1,3 +1,6 @@
+import { homedir } from 'os';
+import { join } from 'path';
+import { promises as fs } from 'fs';
 import type { EnvGodConfig, LoadEnvOptions, AuthExchangeResponse, BundleResponse } from './types.js';
 
 // --- State ---
@@ -32,8 +35,8 @@ export function getEnvGodConfig(options?: LoadEnvOptions): EnvGodConfig {
         service: options?.config?.service ?? env.ENVGOD_SERVICE,
     };
 
-    if (!config.apiUrl || !config.apiKey) {
-        throw new Error('[EnvGod] Missing required configuration: apiUrl and apiKey are required.');
+    if (!config.apiUrl) {
+        throw new Error('[EnvGod] Missing required configuration: apiUrl is required.');
     }
 
     return config as EnvGodConfig;
@@ -96,6 +99,40 @@ async function exchangeToken(config: EnvGodConfig, timeout: number, state: Cache
     return data.token;
 }
 
+async function readUserToken(): Promise<string | null> {
+    const tokenPath = join(homedir(), '.envgod', 'token.json');
+    try {
+        const content = await fs.readFile(tokenPath, 'utf-8');
+        const data = JSON.parse(content);
+        return data?.token || null;
+    } catch {
+        return null;
+    }
+}
+
+async function fetchSecretsWithUserToken(config: EnvGodConfig, userToken: string, timeout: number): Promise<Record<string, string>> {
+    const res = await fetchWithTimeout(`${config.apiUrl}/v1/secrets`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${userToken}`,
+        },
+        body: JSON.stringify({
+            project: config.project,
+            env: config.env,
+            service: config.service,
+        }),
+        timeout,
+    });
+
+    if (!res.ok) {
+        throw new Error(`[EnvGod] Failed to fetch secrets: ${res.status} ${res.statusText}`);
+    }
+
+    const data = (await res.json()) as BundleResponse;
+    return data.values;
+}
+
 async function fetchBundle(config: EnvGodConfig, token: string, timeout: number): Promise<Record<string, string>> {
     const res = await fetchWithTimeout(`${config.apiUrl}/v1/bundle`, {
         method: 'GET',
@@ -118,13 +155,25 @@ async function fetchBundle(config: EnvGodConfig, token: string, timeout: number)
 }
 
 function getConfigFingerprint(config: EnvGodConfig): string {
-    const keyPrefix = config.apiKey.substring(0, 8);
+    const keyPrefix = config.apiKey ? config.apiKey.substring(0, 8) : 'interactive';
     return [config.apiUrl, keyPrefix, config.project, config.env, config.service].join('|');
 }
 
 async function loadEnvInternal(options?: LoadEnvOptions): Promise<Record<string, string>> {
     checkBrowser();
     const config = getEnvGodConfig(options);
+
+    // Interactive mode: Use user token if no API key is provided
+    if (!config.apiKey) {
+        const userToken = await readUserToken();
+        if (!userToken) {
+            throw new Error('[EnvGod] Not logged in. Please run `envgod login`.');
+        }
+        const values = await fetchSecretsWithUserToken(config, userToken, options?.timeout ?? 5000);
+        Object.assign(process.env, values);
+        return values;
+    }
+
     const timeout = options?.timeout ?? 5000;
     const now = Date.now();
     const TOKEN_SKEW_MS = 30 * 1000; // 30 seconds
