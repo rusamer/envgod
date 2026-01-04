@@ -2,6 +2,16 @@
 
 A secure, server-side Node.js and Next.js SDK for fetching environment bundles from the Env.Guards Data Plane.
 
+## The EnvGuards Workflow
+
+Env.Guards is a complete system for managing secrets. This SDK is designed for server-side applications to fetch secrets programmatically at runtime.
+
+1.  **Management via the Dashboard**: A user first signs up and manages secrets using the **Env.Guards Frontend**. There, they generate a scoped API key for a specific service.
+
+2.  **Server-Side Integration with the SDK**: In your server-side code (e.g., Node.js, Next.js), you import this SDK. You provide it with the API key and scope identifiers via environment variables, and it securely fetches and loads the secrets into `process.env`.
+
+3.  **Local Development with the CLI**: For local development or CI/CD, the **`@rusamer/envguards-cli`** is often preferred, as it can inject secrets without requiring any code changes or SDK installation.
+
 ## Features
 
 - **Secure by Default**: Throws if executed in a browser environment.
