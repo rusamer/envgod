@@ -1,7 +1,4 @@
-import { homedir } from 'os';
-import { join } from 'path';
-import { promises as fs } from 'fs';
-import type { EnvGodConfig, LoadEnvOptions, AuthExchangeResponse, BundleResponse } from './types.js';
+import type { EnvGuardsConfig, LoadEnvOptions, AuthExchangeResponse, BundleResponse } from './types.js';
 
 // --- State ---
 interface CacheState {
@@ -21,39 +18,12 @@ export function _resetState() {
 
 // --- Helpers ---
 
-/**
- * Validates and returns the configuration.
- * Prioritizes options > process.env.
- */
-export function getEnvGodConfig(options?: LoadEnvOptions): EnvGodConfig {
-    const env = process.env;
-    const config = {
-        apiUrl: options?.config?.apiUrl ?? env.ENVGOD_API_URL,
-        apiKey: options?.config?.apiKey ?? env.ENVGOD_API_KEY,
-        project: options?.config?.project ?? env.ENVGOD_PROJECT,
-        env: options?.config?.env ?? env.ENVGOD_ENV,
-        service: options?.config?.service ?? env.ENVGOD_SERVICE,
-    };
-
-    if (!config.apiUrl) {
-        throw new Error('[EnvGod] Missing required configuration: apiUrl is required.');
-    }
-
-    return config as EnvGodConfig;
-}
-
-/**
- * Checks if the current environment is a browser.
- */
 function checkBrowser() {
     if (typeof window !== 'undefined') {
-        throw new Error('[EnvGod] Security Warning: SDK execution attempting in browser environment. This SDK is server-only.');
+        throw new Error('[Env.Guards] Security Warning: SDK execution attempting in browser environment. This SDK is server-only.');
     }
 }
 
-/**
- * Fetches with timeout.
- */
 async function fetchWithTimeout(url: string, init: RequestInit & { timeout?: number }) {
     const { timeout = 5000, ...rest } = init;
     const controller = new AbortController();
@@ -64,7 +34,7 @@ async function fetchWithTimeout(url: string, init: RequestInit & { timeout?: num
         return res;
     } catch (err: any) {
         if (err.name === 'AbortError') {
-            throw new Error(`[EnvGod] Request timed out after ${timeout}ms`);
+            throw new Error(`[Env.Guards] Request timed out after ${timeout}ms`);
         }
         throw err;
     } finally {
@@ -74,23 +44,55 @@ async function fetchWithTimeout(url: string, init: RequestInit & { timeout?: num
 
 // --- Core Logic ---
 
-async function exchangeToken(config: EnvGodConfig, timeout: number, state: CacheState): Promise<string> {
-    const res = await fetchWithTimeout(`${config.apiUrl}/v1/auth/exchange`, {
+async function resolveRuntimeKey(config: EnvGuardsConfig): Promise<string> {
+    // 1. Explicitly passed apiKey
+    if (config.apiKey) return config.apiKey;
+
+    // 2. Environment variable
+    if (process.env.ENV_GUARDS_API_KEY) return process.env.ENV_GUARDS_API_KEY;
+
+    // 3. Keytar (for local development, optional)
+    try {
+        const keytar = (await import('keytar')).default;
+        const SERVICE = 'env-guards';
+        const { apiUrl, org, project, env, service } = config;
+        if (apiUrl && org && project && env && service) {
+            const account = `runtime:${apiUrl}:${org}:${project}:${env}:${service}`;
+            const key = await keytar.getPassword(SERVICE, account);
+            if (key) return key;
+        }
+    } catch (err) {
+        // Keytar is optional, so we ignore errors (e.g., native module not built).
+    }
+
+    throw new Error('[Env.Guards] Runtime key not found. Please set ENV_GUARDS_API_KEY, use `env-guards run`, or run `env-guards add-runtime-key`.');
+}
+
+function getFullConfig(options?: LoadEnvOptions): EnvGuardsConfig {
+    const env = process.env;
+    return {
+        apiUrl: options?.config?.apiUrl ?? env.ENV_GUARDS_API_URL,
+        apiKey: options?.config?.apiKey ?? env.ENV_GUARDS_API_KEY,
+        org: options?.config?.org ?? env.ENV_GUARDS_ORG,
+        project: options?.config?.project ?? env.ENV_GUARDS_PROJECT,
+        env: options?.config?.env ?? env.ENV_GUARDS_ENV,
+        service: options?.config?.service ?? env.ENV_GUARDS_SERVICE,
+    };
+}
+
+async function exchangeToken(apiUrl: string, runtimeKey: string, scope: Partial<EnvGuardsConfig>, timeout: number, state: CacheState): Promise<string> {
+    const res = await fetchWithTimeout(`${apiUrl}/v1/auth/exchange`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config.apiKey}`,
+            'Authorization': `Bearer ${runtimeKey}`,
         },
-        body: JSON.stringify({
-            project: config.project,
-            env: config.env,
-            service: config.service,
-        }),
+        body: JSON.stringify(scope),
         timeout,
     });
 
     if (!res.ok) {
-        throw new Error(`[EnvGod] Auth exchange failed: ${res.status} ${res.statusText}`);
+        throw new Error(`[Env.Guards] Auth exchange failed: ${res.status} ${res.statusText}`);
     }
 
     const data = (await res.json()) as AuthExchangeResponse;
@@ -99,86 +101,40 @@ async function exchangeToken(config: EnvGodConfig, timeout: number, state: Cache
     return data.token;
 }
 
-async function readUserToken(): Promise<string | null> {
-    const tokenPath = join(homedir(), '.envgod', 'token.json');
-    try {
-        const content = await fs.readFile(tokenPath, 'utf-8');
-        const data = JSON.parse(content);
-        return data?.token || null;
-    } catch {
-        return null;
-    }
-}
-
-async function fetchSecretsWithUserToken(config: EnvGodConfig, userToken: string, timeout: number): Promise<Record<string, string>> {
-    const res = await fetchWithTimeout(`${config.apiUrl}/v1/secrets`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${userToken}`,
-        },
-        body: JSON.stringify({
-            project: config.project,
-            env: config.env,
-            service: config.service,
-        }),
-        timeout,
-    });
-
-    if (!res.ok) {
-        throw new Error(`[EnvGod] Failed to fetch secrets: ${res.status} ${res.statusText}`);
-    }
-
-    const data = (await res.json()) as BundleResponse;
-    return data.values;
-}
-
-async function fetchBundle(config: EnvGodConfig, token: string, timeout: number): Promise<Record<string, string>> {
-    const res = await fetchWithTimeout(`${config.apiUrl}/v1/bundle`, {
+async function fetchBundle(apiUrl: string, token: string, timeout: number): Promise<Record<string, string>> {
+    const res = await fetchWithTimeout(`${apiUrl}/v1/bundle`, {
         method: 'GET',
-        headers: {
-            'Authorization': `Bearer ${token}`,
-        },
+        headers: { 'Authorization': `Bearer ${token}` },
         timeout,
     });
 
-    if (res.status === 401) {
-        throw new Error('401'); // Signal to retry
-    }
-
-    if (!res.ok) {
-        throw new Error(`[EnvGod] Fetch bundle failed: ${res.status} ${res.statusText}`);
-    }
+    if (res.status === 401) throw new Error('401'); // Signal to retry
+    if (!res.ok) throw new Error(`[Env.Guards] Fetch bundle failed: ${res.status} ${res.statusText}`);
 
     const data = (await res.json()) as BundleResponse;
     return data.values;
 }
 
-function getConfigFingerprint(config: EnvGodConfig): string {
-    const keyPrefix = config.apiKey ? config.apiKey.substring(0, 8) : 'interactive';
-    return [config.apiUrl, keyPrefix, config.project, config.env, config.service].join('|');
+function getConfigFingerprint(apiUrl: string, runtimeKey: string, config: EnvGuardsConfig): string {
+    const keyPrefix = runtimeKey.substring(0, 12); // env-guards_sk_...
+    return [apiUrl, keyPrefix, config.org, config.project, config.env, config.service].join('|');
 }
 
 async function loadEnvInternal(options?: LoadEnvOptions): Promise<Record<string, string>> {
     checkBrowser();
-    const config = getEnvGodConfig(options);
+    const config = getFullConfig(options);
+    const { apiUrl, ...scope } = config;
 
-    // Interactive mode: Use user token if no API key is provided
-    if (!config.apiKey) {
-        const userToken = await readUserToken();
-        if (!userToken) {
-            throw new Error('[EnvGod] Not logged in. Please run `envgod login`.');
-        }
-        const values = await fetchSecretsWithUserToken(config, userToken, options?.timeout ?? 5000);
-        Object.assign(process.env, values);
-        return values;
+    if (!apiUrl) {
+        throw new Error('[Env.Guards] Missing required configuration: apiUrl is required.');
     }
 
+    const runtimeKey = await resolveRuntimeKey(config);
     const timeout = options?.timeout ?? 5000;
     const now = Date.now();
-    const TOKEN_SKEW_MS = 30 * 1000; // 30 seconds
+    const TOKEN_SKEW_MS = 30 * 1000;
 
-    const fingerprint = getConfigFingerprint(config);
+    const fingerprint = getConfigFingerprint(apiUrl, runtimeKey, config);
     if (!cache.has(fingerprint)) {
         cache.set(fingerprint, { token: null, tokenExpiresAt: null, bundle: null });
     }
@@ -188,7 +144,7 @@ async function loadEnvInternal(options?: LoadEnvOptions): Promise<Record<string,
     let tokenValid = token && state.tokenExpiresAt && state.tokenExpiresAt > (now + TOKEN_SKEW_MS);
 
     if (!tokenValid) {
-        token = await exchangeToken(config, timeout, state);
+        token = await exchangeToken(apiUrl, runtimeKey, scope, timeout, state);
     }
 
     if (state.bundle && tokenValid) {
@@ -197,7 +153,7 @@ async function loadEnvInternal(options?: LoadEnvOptions): Promise<Record<string,
     }
 
     try {
-        const values = await fetchBundle(config, token!, timeout);
+        const values = await fetchBundle(apiUrl, token!, timeout);
         state.bundle = values;
         Object.assign(process.env, values);
         return values;
@@ -205,8 +161,8 @@ async function loadEnvInternal(options?: LoadEnvOptions): Promise<Record<string,
         if (err.message === '401') {
             state.token = null;
             state.bundle = null;
-            const newToken = await exchangeToken(config, timeout, state);
-            const values = await fetchBundle(config, newToken, timeout);
+            const newToken = await exchangeToken(apiUrl, runtimeKey, scope, timeout, state);
+            const values = await fetchBundle(apiUrl, newToken, timeout);
             state.bundle = values;
             Object.assign(process.env, values);
             return values;
@@ -215,19 +171,14 @@ async function loadEnvInternal(options?: LoadEnvOptions): Promise<Record<string,
     }
 }
 
-/**
- * Main entry point to load environment variables.
- * Uses Singleflight pattern to prevent concurrent network requests.
- */
 export function loadEnv(options?: LoadEnvOptions): Promise<Record<string, string>> {
     if (pendingLoadPromise) {
         return pendingLoadPromise;
     }
 
-    pendingLoadPromise = loadEnvInternal(options)
-        .finally(() => {
-            pendingLoadPromise = null;
-        });
+    pendingLoadPromise = loadEnvInternal(options).finally(() => {
+        pendingLoadPromise = null;
+    });
 
     return pendingLoadPromise;
 }

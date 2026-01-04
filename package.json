@@ -1,10 +1,10 @@
 {
-  "name": "@rusamer/envgod",
-  "version": "0.0.3",
-  "description": "Secure Node.js/Next.js SDK for EnvGod",
+  "name": "@rusamer/env-guards",
+  "version": "0.1.1",
+  "description": "Secure Node.js/Next.js SDK for Env.Guards",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rubric-labs/envgod-sdk"
+    "url": "https://github.com/rubric-labs/env-guards-sdk"
   },
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -53,5 +53,8 @@
   },
   "dependencies": {
     "server-only": "^0.0.1"
+  },
+  "optionalDependencies": {
+    "keytar": "^7.9.0"
   }
 }

@@ -1,24 +1,24 @@
-# EnvGod SDK
+# Env.Guards SDK
 
-A secure, server-side Node.js and Next.js SDK for fetching environment bundles from the EnvGod Data Plane.
+A secure, server-side Node.js and Next.js SDK for fetching environment bundles from the Env.Guards Data Plane.
 
 ## Features
 
 - **Secure by Default**: Throws if executed in a browser environment.
 - **In-Memory Only**: Never writes secrets to disk or logs them.
-- **Auto-Auth**: Exchanges `ENVGOD_API_KEY` for short-lived JWTs.
+- **Auto-Auth**: Exchanges `ENV_GUARDS_API_KEY` for short-lived JWTs.
 - **Smart Caching**: Caches tokens and bundles in memory until expiry.
 - **Reliable**: Automatic retry on 401 (token expiry) and network resiliency.
-- **Next.js Ready**: Dedicated `envgod/next` entry point with `server-only` guards.
+- **Next.js Ready**: Dedicated `envguards/next` entry point with `server-only` guards.
 
 ## Installation
 
 ```bash
-npm install @rusamer/envgod
+npm install @rusamer/envguards
 # or
-pnpm add @rusamer/envgod
+pnpm add @rusamer/envguards
 # or
-yarn add @rusamer/envgod
+yarn add @rusamer/envguards
 ```
 
 ## Configuration
@@ -27,18 +27,18 @@ The SDK automatically reads the following environment variables:
 
 | Variable | Description |
 |C...|...|
-| `ENVGOD_API_URL` | URL of the EnvGod Data Plane |
-| `ENVGOD_API_KEY` | Your project Service Key |
-| `ENVGOD_PROJECT` | Project ID |
-| `ENVGOD_ENV` | Environment Name (e.g., prod) |
-| `ENVGOD_SERVICE` | Service Name |
+| `ENV_GUARDS_API_URL` | URL of the Env.Guards Data Plane |
+| `ENV_GUARDS_API_KEY` | Your project Service Key |
+| `ENV_GUARDS_PROJECT` | Project ID |
+| `ENV_GUARDS_ENV` | Environment Name (e.g., prod) |
+| `ENV_GUARDS_SERVICE` | Service Name |
 
 ```env
-ENVGOD_API_URL=https://api.example.com
-ENVGOD_API_KEY=sk_xxx
-ENVGOD_PROJECT=myapp
-ENVGOD_ENV=prod
-ENVGOD_SERVICE=web
+ENV_GUARDS_API_URL=https://api.example.com
+ENV_GUARDS_API_KEY=sk_xxx
+ENV_GUARDS_PROJECT=myapp
+ENV_GUARDS_ENV=prod
+ENV_GUARDS_SERVICE=web
 ```
 
 ## Usage
@@ -46,7 +46,7 @@ ENVGOD_SERVICE=web
 ### Node.js
 
 ```typescript
-import { loadEnv } from '@rusamer/envgod';
+import { loadEnv } from '@rusamer/envguards';
 
 async function main() {
   const env = await loadEnv();
@@ -64,7 +64,7 @@ Use the Next.js specific helper to ensure server-side only execution.
 
 ```typescript
 // src/lib/env.ts
-import { loadServerEnv } from '@rusamer/envgod/next';
+import { loadServerEnv } from '@rusamer/envguards/next';
 
 export async function getSecrets() {
   return loadServerEnv();
